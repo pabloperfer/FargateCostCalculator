@@ -1,18 +1,17 @@
 # FargateCostCalculator
 Fargate Cost Calculator, A solution that for each stopped Fargate Task a json object will be generated in S3 with the billing report in a Json object.  
 
-Currently Fargate does not allow cost allocation tagging, this prevents customers from tracking with detail their Fargate resources. Currently there's not any workaround for this more than a manual estimate an the customers are not happy with this.
+Currently Fargate does not allow cost allocation tagging, this prevents customers from tracking with detail their Fargate resources. Currently there's not any workaround for this more than a manual estimate.
 
-Today I have created a solution that generates a billing report for each task that fargate executes.
+I have created a solution that generates a billing report for each task that fargate executes.
 
-It takes into account the task vCPUs, task Memory and the time spent from the pull action until the task is completely stopped .
+It takes into account the task vCPUs, task Memory and the time spent from the pull action until the task is completely stopped.
 
-A CloudWatch event that is triggered only whenever a Fargate Task is stopped, will invoke a Lambda function that will poll the task , and when the task is completely stopped it will fetch all the 
-relevant information from it in order to make the necessary calculations .
+A CloudWatch event that is triggered only whenever a Fargate Task is stopped, will invoke a Lambda function that will poll the task , and when the task is completely stopped it will fetch all the relevant information from it in order to make the necessary calculations .
 
 Once the report is done, it will write a file with a json object in a S3 bucket. This will allow as to parse it later with Athena or any similar tool.
 
-You can check the info in CloudWatch logs 
+You can check the info in CloudWatch logs :
 
 memory : 4096
 cpu : 2048
