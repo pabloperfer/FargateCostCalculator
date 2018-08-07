@@ -1,0 +1,194 @@
+Description: Fargate Cost Calculator, A solution that for each stopped Fargate Task a json object will be generated in S3 with the billing report in a Json object.  
+
+
+Parameters: 
+  Bucket: 
+    Type: String
+    Description: Enter Bucket name where you will store tasks consumption report
+
+  vCpuPrice:
+    Type: Number
+    Description: Enter the current price for a CPU per second
+    Default: "0.00001406"
+
+  GBPrice:
+    Type: Number
+    Description: Enter the current price for a 1GB per second
+    Default: "0.00000353"
+
+
+Resources:
+  StoppedTasksEvent:
+    DependsOn: LambdaFunction
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule"
+      EventPattern: 
+        source:
+        - aws.ecs
+        detail-type:
+        - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+          - ecs.amazonaws.com
+          eventName:
+          - StopTask
+          responseElements:
+            task:
+              launchType:
+              - FARGATE
+      State: "ENABLED"
+      Targets: 
+        - Arn:
+           !Sub ${LambdaFunction.Arn}
+          Id: "StoppedTasksEvent"
+
+    
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: >
+        Lambda function that injects in a specific CloudWatch logs group and stream the ECS task events for a given cluster
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import time
+          import datetime 
+          import json
+
+          CPUperSec = os.environ['vCpuPrice']
+          GBperSec = os.environ['GBPrice']
+
+          def lambda_handler(event, context):
+              client = boto3.client('ecs')
+              TaskId = event["detail"]["requestParameters"]["task"]
+              TaskCluster = event["detail"]["requestParameters"]["cluster"]
+              #TaskStatus = event["detail"]["responseElements"]["task"]["lastStatus"]
+             
+              response = client.describe_tasks(cluster=TaskCluster,
+                              tasks=[TaskId])
+              TaskInfo = response["tasks"][0]
+              TaskStatus = TaskInfo["lastStatus"]
+              
+              if TaskStatus != "STOPPED":
+                  while TaskStatus != "STOPPED":
+                      time.sleep(1)
+                      response = client.describe_tasks(cluster=TaskCluster,
+                              tasks=[TaskId])
+                      TaskInfo = response["tasks"][0]
+                      TaskStatus = TaskInfo["lastStatus"]
+                      
+              Mem=int(TaskInfo["memory"])
+              print ("memory : " + str(Mem))
+              Cpu=int(TaskInfo["cpu"])
+              print ("cpu : " + str(Cpu))
+              StartBilling=TaskInfo["pullStartedAt"]
+              print ("Billing started after pull started at " + str(StartBilling.strftime("%b %d %Y %H:%M:%S"))) 
+              TaskStopped = TaskInfo["stoppedAt"]
+              print ("Billing Stopped after task stopped at " + str(TaskStopped.strftime("%b %d %Y %H:%M:%S"))) 
+              TotalTime = TaskStopped - StartBilling 
+              print ("TotalTime is " + str(TotalTime))
+              TotalSeconds = TotalTime.total_seconds()
+              print ("Total Seconds : " + str(TotalSeconds))
+              
+              resultList=MakingtheMaths(TotalSeconds,Cpu,Mem)
+              PushingResults(resultList,Cpu,Mem,StartBilling,TaskStopped,TotalTime,TaskId,TaskCluster,TotalSeconds)
+
+          def MakingtheMaths(TotalSeconds,Cpu,Mem):
+            TimeConsumed = 0
+            if TotalSeconds < 60:
+             TimeConsumed = 60
+            elif TotalSeconds >= 60:
+             TimeConsumed=TotalSeconds
+            
+            CpuUnit = Cpu / 1024
+            print ("CpuUnits : " + str(CpuUnit))
+            CpuConsumption = TimeConsumed * 0.00001406 * CpuUnit
+            print ("Cpu Consumption is " + str(CpuConsumption) + "$")
+            
+            MemUnit = Mem / 1024
+            print ("MemUnits : " + str(MemUnit))
+            MemConsumption = TimeConsumed *  MemUnit * 0.00000353 
+            print ("Memory Consumption is " + str(MemConsumption) + "$")
+
+            TotalConsumption = CpuConsumption + MemConsumption
+            print ("total consumption is " +str(TotalConsumption) + "$")
+            
+            resultList = [None] * 3
+            resultList[0]=MemConsumption
+            resultList[1]=CpuConsumption
+            resultList[2]=TotalConsumption
+            
+            print("result is ", resultList)
+            return resultList
+            
+          def PushingResults(resultList,Cpu,Mem,StartBilling,TaskStopped,TotalTime,TaskId,TaskCluster,TotalSeconds):
+              bucket = os.environ['bucket']
+              d = {}
+              d["TaskId"] = TaskId
+              d["TaskCluster"] =TaskCluster
+              d["Billing_Start_Time"] =StartBilling.strftime("%b %d %Y %H:%M:%S")
+              d["Billing_Stop_Time"] = TaskStopped.strftime("%b %d %Y %H:%M:%S")
+              d["Cpu"] = Cpu
+              d["Memory"] = Mem
+              d["TotalSeconds"] = TotalSeconds
+              d["CpuExpenses $"] = resultList[1]
+              d["MemExpenses $"] = resultList[0]
+              d["TotalExpenses $"] = resultList[2]
+              print (d)
+            
+              s3 = boto3.resource('s3')
+              obj = s3.Object(bucket,time.strftime("%Y%m%d-%H%M%S"))
+              obj.put(Body=json.dumps(d))
+  
+                   
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !Sub ${LambdaExecutionRole.Arn}
+      Runtime: python3.6
+      Environment: 
+        Variables:
+          bucket : !Ref Bucket
+          vCpuPrice : !Ref vCpuPrice
+          GBPrice : !Ref GBPrice
+
+
+
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Ref: "LambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !Sub ${StoppedTasksEvent.Arn}
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudwatchlogsandPutObject
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:Describe*
+                  - s3:PutObject  
+                  - ecs:Describe*
+                Resource: "*"
